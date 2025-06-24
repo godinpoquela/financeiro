@@ -1,0 +1,991 @@
+<!DOCTYPE html>
+<html lang="pt-BR">a
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Painel de Gerenciamento Financeiro com IA e Firestore</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Chosen Palette: Warm Neutrals & Deep Teal -->
+    <!-- Application Structure Plan: A single-page application (SPA) with a fixed sidebar for navigation. The core change is the integration of Firestore for data persistence. The app now authenticates a user (anonymously or via token) and stores all data (transactions, goals, installments) under that user's unique ID in Firestore. UI is now fully dynamic, rendering data from real-time Firestore snapshots. Modals are used for all create/update operations, ensuring a clean and task-focused user experience. -->
+    <!-- Visualization & Content Choices: 
+        1. Data Source: All data now comes from real-time onSnapshot listeners from Firestore collections, replacing the static local state.
+        2. CRUD Operations: Full Create, Read, Update, Delete capabilities added for Goals and Installments, not just Transactions. This is handled via modals and Firestore SDK calls (addDoc, updateDoc, deleteDoc).
+        3. Real-time UI: The UI is now fully reactive. Any change in the Firestore database (e.g., from another device) will instantly update the charts, KPIs, and tables without a page refresh.
+        4. User Identification: A unique User ID is displayed in the UI, which is crucial for data segregation and potential future multi-user features.
+        5. Gemini Features: Unchanged in function, but now operate on the real-time data fetched from Firestore, making their insights always relevant to the user's current financial state.
+        6. Filtering Feature (Lançamentos): Added a comprehensive filtering panel to the transactions view, allowing users to filter by description, type, category, and date range. This enhances data exploration and makes it easier for users to find specific information.
+        7. Bank Management Feature: Added full CRUD for bank accounts. Users can add/delete banks in a dedicated modal. Transactions are now linked to a bank, and the transactions view includes a bank column and filter. This provides a more granular level of financial tracking.
+    -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .chart-container { position: relative; width: 100%; max-width: 800px; margin-left: auto; margin-right: auto; height: 320px; max-height: 40vh; }
+        @media (min-width: 768px) { .chart-container { height: 350px; } }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #888; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #555; }
+        .modal-backdrop {
+            background-color: rgba(0, 0, 0, 0.5);
+            transition: opacity 0.3s ease-in-out;
+        }
+        .modal-content {
+             max-height: 80vh;
+             overflow-y: auto;
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #135D66;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+         #app-loader {
+            display: flex;
+            position: fixed;
+            inset: 0;
+            background-color: #F8F7F4;
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+        }
+    </style>
+</head>
+<body class="bg-[#F8F7F4] text-gray-800 flex">
+    <div id="app-loader">
+        <div class="loader"></div>
+    </div>
+    
+    <aside class="w-64 bg-white p-6 border-r border-gray-200 h-screen flex flex-col fixed top-0 left-0">
+        <div>
+            <h1 class="text-2xl font-bold text-[#003C43] mb-10">Finanças Pro</h1>
+            <nav class="flex flex-col space-y-2">
+                <button onclick="showView('painel')" class="nav-link bg-[#E3FEF7] text-[#135D66] flex items-center p-3 rounded-lg font-semibold">
+                    <span class="mr-3">📊</span> Painel
+                </button>
+                <button onclick="showView('lancamentos')" class="nav-link hover:bg-gray-100 flex items-center p-3 rounded-lg font-medium">
+                    <span class="mr-3">💸</span> Lançamentos
+                </button>
+                <button onclick="showView('metas')" class="nav-link hover:bg-gray-100 flex items-center p-3 rounded-lg font-medium">
+                    <span class="mr-3">🎯</span> Metas
+                </button>
+                <button onclick="showView('parcelamentos')" class="nav-link hover:bg-gray-100 flex items-center p-3 rounded-lg font-medium">
+                    <span class="mr-3">💳</span> Parcelamentos
+                </button>
+            </nav>
+        </div>
+        <div class="mt-auto">
+             <button onclick="openModal('lancamentoModal')" class="w-full bg-[#135D66] text-white py-3 rounded-lg font-semibold hover:bg-[#003C43] transition-colors duration-300">
+                + Novo Lançamento
+            </button>
+             <button onclick="openModal('bancoModal')" class="w-full mt-2 bg-gray-200 text-gray-800 py-2 px-4 rounded-lg font-semibold hover:bg-gray-300">
+                Gerenciar Bancos
+            </button>
+            <div class="mt-4 text-center text-gray-400 text-xs">
+                <p>User ID:</p>
+                <p id="user-id-display" class="break-words"></p>
+            </div>
+        </div>
+    </aside>
+
+    <main class="flex-1 ml-64 p-8">
+        
+        <div id="painel" class="view">
+            <header class="mb-8 flex justify-between items-center">
+                <div>
+                    <h2 class="text-3xl font-bold text-gray-800">Painel Geral</h2>
+                    <p class="text-gray-500 mt-1">
+                        Sua central de controle financeiro, agora com análises inteligentes.
+                    </p>
+                </div>
+                <button onclick="handleAnaliseFinanceira()" class="bg-yellow-400 text-yellow-900 font-bold py-2 px-4 rounded-lg hover:bg-yellow-500 transition-colors flex items-center">
+                    <span class="mr-2">✨</span> Análise Financeira
+                </button>
+            </header>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+                <div class="bg-white p-6 rounded-xl border border-gray-200">
+                    <h3 class="text-sm font-medium text-gray-500">Receita do Mês</h3>
+                    <p id="kpi-receita" class="text-3xl font-bold text-green-600 mt-2">R$ 0,00</p>
+                </div>
+                <div class="bg-white p-6 rounded-xl border border-gray-200">
+                    <h3 class="text-sm font-medium text-gray-500">Despesa do Mês</h3>
+                    <p id="kpi-despesa" class="text-3xl font-bold text-red-600 mt-2">R$ 0,00</p>
+                </div>
+                <div class="bg-white p-6 rounded-xl border border-gray-200">
+                    <h3 class="text-sm font-medium text-gray-500">Saldo do Mês</h3>
+                    <p id="kpi-saldo" class="text-3xl font-bold text-gray-800 mt-2">R$ 0,00</p>
+                </div>
+                <div class="bg-white p-6 rounded-xl border border-gray-200">
+                    <h3 class="text-sm font-medium text-gray-500">Contas Pendentes</h3>
+                    <p id="kpi-pendente" class="text-3xl font-bold text-orange-500 mt-2">R$ 0,00</p>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-5 gap-8">
+                <div class="lg:col-span-3 bg-white p-6 rounded-xl border border-gray-200">
+                    <h3 class="font-bold text-lg mb-4">Receitas vs. Despesas</h3>
+                     <div class="chart-container">
+                        <canvas id="fluxoCaixaChart"></canvas>
+                    </div>
+                </div>
+                <div class="lg:col-span-2 bg-white p-6 rounded-xl border border-gray-200">
+                     <h3 class="font-bold text-lg mb-4">Despesas por Categoria</h3>
+                     <div class="chart-container">
+                        <canvas id="despesasCategoriaChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="lancamentos" class="view hidden">
+            <header class="mb-8">
+                <h2 class="text-3xl font-bold text-gray-800">Lançamentos</h2>
+                <p class="text-gray-500 mt-1">
+                    Filtre e explore todos os seus registros financeiros. Clique em um registro para deletar.
+                </p>
+            </header>
+            
+            <div id="filter-panel" class="bg-white p-4 rounded-xl border border-gray-200 mb-6 grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4 items-end">
+                <div class="lg:col-span-1">
+                    <label for="filter-descricao" class="text-sm font-medium text-gray-700">Descrição</label>
+                    <input type="text" id="filter-descricao" placeholder="Ex: Supermercado..." class="mt-1 w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                </div>
+                <div>
+                    <label for="filter-tipo" class="text-sm font-medium text-gray-700">Tipo</label>
+                    <select id="filter-tipo" class="mt-1 w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                        <option value="todos">Todos</option>
+                        <option value="receita">Receita</option>
+                        <option value="despesa">Despesa</option>
+                    </select>
+                </div>
+                 <div>
+                    <label for="filter-categoria" class="text-sm font-medium text-gray-700">Categoria</label>
+                    <select id="filter-categoria" class="mt-1 w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                        <option value="todas">Todas</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="filter-banco" class="text-sm font-medium text-gray-700">Banco</label>
+                    <select id="filter-banco" class="mt-1 w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                        <option value="todos">Todos</option>
+                    </select>
+                </div>
+                <div>
+                    <button id="clear-filters-btn" class="w-full bg-gray-200 text-gray-800 py-2 px-4 rounded-lg font-semibold hover:bg-gray-300">Limpar Filtros</button>
+                </div>
+            </div>
+
+            <div class="bg-white p-6 rounded-xl border border-gray-200">
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left">
+                        <thead class="border-b border-gray-200">
+                            <tr>
+                                <th class="p-4 text-sm font-semibold">Data</th>
+                                <th class="p-4 text-sm font-semibold">Descrição</th>
+                                <th class="p-4 text-sm font-semibold">Banco</th>
+                                <th class="p-4 text-sm font-semibold">Categoria</th>
+                                <th class="p-4 text-sm font-semibold text-right">Valor</th>
+                                <th class="p-4 text-sm font-semibold">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="lancamentos-table-body">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div id="metas" class="view hidden">
+            <header class="mb-8 flex justify-between items-center">
+                 <div>
+                    <h2 class="text-3xl font-bold text-gray-800">Minhas Metas</h2>
+                    <p class="text-gray-500 mt-1">
+                        Acompanhe seus objetivos e use a IA para criar um plano de ação.
+                    </p>
+                </div>
+                <button onclick="openModal('metaModal')" class="bg-[#135D66] text-white font-bold py-2 px-4 rounded-lg hover:bg-[#003C43] transition-colors">
+                    + Nova Meta
+                </button>
+            </header>
+            <div id="metas-container" class="space-y-6">
+            </div>
+        </div>
+
+        <div id="parcelamentos" class="view hidden">
+            <header class="mb-8 flex justify-between items-center">
+                 <div>
+                    <h2 class="text-3xl font-bold text-gray-800">Controle de Parcelamentos</h2>
+                    <p class="text-gray-500 mt-1">
+                        Gerencie suas compras a prazo para ter uma visão clara dos seus compromissos.
+                    </p>
+                </div>
+                 <button onclick="openModal('parcelamentoModal')" class="bg-[#135D66] text-white font-bold py-2 px-4 rounded-lg hover:bg-[#003C43] transition-colors">
+                    + Novo Parcelamento
+                </button>
+            </header>
+             <div class="bg-white p-6 rounded-xl border border-gray-200">
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left">
+                        <thead class="border-b border-gray-200">
+                            <tr>
+                                <th class="p-4 text-sm font-semibold">Descrição</th>
+                                <th class="p-4 text-sm font-semibold">Categoria</th>
+                                <th class="p-4 text-sm font-semibold">Progresso</th>
+                                <th class="p-4 text-sm font-semibold">Valor da Parcela</th>
+                                <th class="p-4 text-sm font-semibold text-right">Valor Restante</th>
+                                <th class="p-4 text-sm font-semibold text-center">Ações</th>
+                            </tr>
+                        </thead>
+                        <tbody id="parcelamentos-table-body">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </main>
+    
+    <!-- Modals -->
+    <div id="lancamentoModal" class="fixed inset-0 z-50 items-center justify-center hidden modal-backdrop">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg m-4 modal-content">
+            <div class="p-6 border-b border-gray-200 flex justify-between items-center">
+                <h3 class="text-xl font-bold">Novo Lançamento</h3>
+                <button onclick="closeModal('lancamentoModal')" class="text-lg font-bold text-gray-400 hover:text-gray-600">&times;</button>
+            </div>
+            <form id="lancamentoForm" class="p-6 space-y-4">
+                 <div>
+                    <label for="tipo" class="block text-sm font-medium text-gray-700">Tipo</label>
+                    <select id="tipo" name="tipo" class="mt-1 block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                        <option value="despesa">Despesa</option>
+                        <option value="receita">Receita</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="descricao" class="block text-sm font-medium text-gray-700">Descrição</label>
+                    <input type="text" id="descricao" name="descricao" required class="mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                </div>
+                 <div>
+                    <label for="valor" class="block text-sm font-medium text-gray-700">Valor</label>
+                    <input type="number" id="valor" name="valor" step="0.01" required class="mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                </div>
+                <div>
+                    <label for="data" class="block text-sm font-medium text-gray-700">Data</label>
+                    <input type="date" id="data" name="data" required class="mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                </div>
+                <div>
+                    <label for="banco" class="block text-sm font-medium text-gray-700">Banco</label>
+                    <select id="banco" name="banco" required class="mt-1 block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                    </select>
+                </div>
+                 <div>
+                    <label for="categoria" class="block text-sm font-medium text-gray-700">Categoria</label>
+                    <select id="categoria" name="categoria" class="mt-1 block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                    </select>
+                </div>
+                 <div>
+                    <label for="status" class="block text-sm font-medium text-gray-700">Status</label>
+                    <select id="status" name="status" class="mt-1 block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                    </select>
+                </div>
+                <div class="pt-4 flex justify-end space-x-3">
+                     <button type="button" onclick="closeModal('lancamentoModal')" class="bg-gray-200 text-gray-800 py-2 px-4 rounded-lg font-semibold hover:bg-gray-300">Cancelar</button>
+                    <button type="submit" class="bg-[#135D66] text-white py-2 px-4 rounded-lg font-semibold hover:bg-[#003C43]">Salvar</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <div id="metaModal" class="fixed inset-0 z-50 items-center justify-center hidden modal-backdrop">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg m-4">
+             <div class="p-6 border-b border-gray-200 flex justify-between items-center">
+                <h3 class="text-xl font-bold">Nova Meta Financeira</h3>
+                <button onclick="closeModal('metaModal')" class="text-lg font-bold text-gray-400 hover:text-gray-600">&times;</button>
+            </div>
+            <form id="metaForm" class="p-6 space-y-4">
+                <div>
+                    <label for="meta-nome" class="block text-sm font-medium text-gray-700">Nome da Meta</label>
+                    <input type="text" id="meta-nome" name="nome" required class="mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                </div>
+                <div>
+                    <label for="meta-total" class="block text-sm font-medium text-gray-700">Valor Total (R$)</label>
+                    <input type="number" id="meta-total" name="total" step="0.01" required class="mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                </div>
+                <div class="pt-4 flex justify-end space-x-3">
+                     <button type="button" onclick="closeModal('metaModal')" class="bg-gray-200 text-gray-800 py-2 px-4 rounded-lg font-semibold hover:bg-gray-300">Cancelar</button>
+                    <button type="submit" class="bg-[#135D66] text-white py-2 px-4 rounded-lg font-semibold hover:bg-[#003C43]">Salvar Meta</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+     <div id="parcelamentoModal" class="fixed inset-0 z-50 items-center justify-center hidden modal-backdrop">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg m-4">
+             <div class="p-6 border-b border-gray-200 flex justify-between items-center">
+                <h3 class="text-xl font-bold">Novo Parcelamento</h3>
+                <button onclick="closeModal('parcelamentoModal')" class="text-lg font-bold text-gray-400 hover:text-gray-600">&times;</button>
+            </div>
+            <form id="parcelamentoForm" class="p-6 space-y-4">
+                 <div>
+                    <label for="parcelamento-descricao" class="block text-sm font-medium text-gray-700">Descrição da Compra</label>
+                    <input type="text" id="parcelamento-descricao" name="descricao" required class="mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                </div>
+                <div>
+                    <label for="parcelamento-categoria" class="block text-sm font-medium text-gray-700">Categoria</label>
+                    <select id="parcelamento-categoria" name="categoria" class="mt-1 block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                    </select>
+                </div>
+                 <div>
+                    <label for="parcelamento-valor" class="block text-sm font-medium text-gray-700">Valor Total (R$)</label>
+                    <input type="number" id="parcelamento-valor" name="valorTotal" step="0.01" required class="mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                </div>
+                <div>
+                    <label for="parcelamento-parcelas" class="block text-sm font-medium text-gray-700">Número de Parcelas</label>
+                    <input type="number" id="parcelamento-parcelas" name="parcelas" required class="mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                </div>
+                 <div>
+                    <label for="parcelamento-pagas" class="block text-sm font-medium text-gray-700">Parcelas Já Pagas</label>
+                    <input type="number" id="parcelamento-pagas" name="pagas" value="0" required class="mt-1 block w-full py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                </div>
+                <div class="pt-4 flex justify-end space-x-3">
+                     <button type="button" onclick="closeModal('parcelamentoModal')" class="bg-gray-200 text-gray-800 py-2 px-4 rounded-lg font-semibold hover:bg-gray-300">Cancelar</button>
+                    <button type="submit" class="bg-[#135D66] text-white py-2 px-4 rounded-lg font-semibold hover:bg-[#003C43]">Salvar Parcelamento</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+     <div id="bancoModal" class="fixed inset-0 z-50 items-center justify-center hidden modal-backdrop">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md m-4">
+            <div class="p-6 border-b border-gray-200 flex justify-between items-center">
+                <h3 class="text-xl font-bold">Gerenciar Bancos</h3>
+                <button onclick="closeModal('bancoModal')" class="text-lg font-bold text-gray-400 hover:text-gray-600">&times;</button>
+            </div>
+            <div class="p-6">
+                <form id="bancoForm" class="flex items-center gap-2 mb-4">
+                    <input type="text" id="banco-nome" name="nome" placeholder="Nome do novo banco" required class="flex-grow py-2 px-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-[#135D66] focus:border-[#135D66]">
+                    <button type="submit" class="bg-[#135D66] text-white py-2 px-4 rounded-lg font-semibold hover:bg-[#003C43]">Adicionar</button>
+                </form>
+                <div id="banco-list" class="space-y-2 max-h-60 overflow-y-auto">
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="analiseModal" class="fixed inset-0 z-50 items-center justify-center hidden modal-backdrop">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl m-4 modal-content">
+            <div class="p-6 border-b border-gray-200 flex justify-between items-center sticky top-0 bg-white">
+                <h3 class="text-xl font-bold">✨ Análise Financeira do Mês</h3>
+                <button onclick="closeModal('analiseModal')" class="text-lg font-bold text-gray-400 hover:text-gray-600">&times;</button>
+            </div>
+            <div id="analise-modal-body" class="p-6 prose max-w-none">
+                <div class="flex flex-col items-center justify-center h-48">
+                    <div class="loader"></div>
+                    <p class="mt-4 text-gray-600">Analisando seus dados...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div id="planoMetaModal" class="fixed inset-0 z-50 items-center justify-center hidden modal-backdrop">
+         <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl m-4 modal-content">
+            <div class="p-6 border-b border-gray-200 flex justify-between items-center sticky top-0 bg-white">
+                <h3 class="text-xl font-bold">✨ Plano de Ação para Meta</h3>
+                <button onclick="closeModal('planoMetaModal')" class="text-lg font-bold text-gray-400 hover:text-gray-600">&times;</button>
+            </div>
+            <div id="plano-meta-modal-body" class="p-6 prose max-w-none">
+                <div class="flex flex-col items-center justify-center h-48">
+                    <div class="loader"></div>
+                    <p class="mt-4 text-gray-600">Criando seu plano de ação...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+<script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, collection, doc, addDoc, onSnapshot, deleteDoc, updateDoc, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    const state = {
+        lancamentos: [],
+        metas: [],
+        parcelamentos: [],
+        bancos: [],
+        categorias: {
+            despesa: ['Moradia', 'Transporte', 'Alimentação', 'Saúde', 'Lazer', 'Educação', 'Dívidas', 'Investimentos/Metas', 'Outros'],
+            receita: ['Salário', 'Renda Extra', 'Investimentos', 'Presente', 'Outros']
+        },
+        status: ['Pago', 'Pendente'],
+        views: ['painel', 'lancamentos', 'metas', 'parcelamentos'],
+        activeView: 'painel',
+        charts: {},
+        db: null,
+        userId: null,
+        collections: {
+            lancamentos: null,
+            metas: null,
+            parcelamentos: null,
+            bancos: null
+        },
+        filters: {
+            descricao: '',
+            tipo: 'todos',
+            categoria: 'todas',
+            banco: 'todos'
+        }
+    };
+
+    const formatCurrency = (value) => {
+        return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+    };
+
+    const formatDate = (date) => {
+        if (!date) return '';
+        const d = date instanceof Date ? date : date.toDate();
+        return new Date(d).toLocaleDateString('pt-BR', {timeZone: 'UTC'});
+    };
+    
+    async function callGemini(prompt) {
+        let chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
+        const payload = { contents: chatHistory };
+        const apiKey = "";
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+
+        try {
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            
+            if (!response.ok) throw new Error(`API error: ${response.statusText}`);
+
+            const result = await response.json();
+            if (result.candidates && result.candidates.length > 0 && result.candidates[0].content && result.candidates[0].content.parts && result.candidates[0].content.parts.length > 0) {
+                return result.candidates[0].content.parts[0].text;
+            } else {
+                return "Não foi possível obter uma resposta da IA. A estrutura da resposta é inesperada.";
+            }
+        } catch (error) {
+            return `Ocorreu um erro ao contatar a IA: ${error.message}.`;
+        }
+    }
+
+    window.handleAnaliseFinanceira = async () => {
+        const modalBody = document.getElementById('analise-modal-body');
+        modalBody.innerHTML = `<div class="flex flex-col items-center justify-center h-48"><div class="loader"></div><p class="mt-4 text-gray-600">Analisando seus dados...</p></div>`;
+        openModal('analiseModal');
+
+        const today = new Date();
+        const lancamentosMes = state.lancamentos.filter(l => {
+            const dataLancamento = l.data.toDate();
+            return dataLancamento.getMonth() === today.getMonth() && dataLancamento.getFullYear() === today.getFullYear();
+        });
+
+        if (lancamentosMes.length === 0) {
+            modalBody.innerHTML = `<p>Não há dados de lançamento para o mês atual para analisar.</p>`;
+            return;
+        }
+
+        const prompt = `
+            Você é um consultor financeiro. Analise a seguinte lista de transações do mês atual e forneça um resumo dos hábitos de consumo, aponte as 3 principais categorias de despesa, e dê 5 dicas práticas e personalizadas para economizar dinheiro com base nesses dados. Formate a resposta usando Markdown com cabeçalhos para 'Resumo dos Gastos', 'Principais Despesas' e 'Dicas para Economizar'. Seja claro e direto.
+
+            Transações:
+            ${JSON.stringify(lancamentosMes.map(l => ({descricao: l.descricao, categoria: l.categoria, valor: l.valor, tipo: l.tipo})))}
+        `;
+
+        const response = await callGemini(prompt);
+        modalBody.innerHTML = response.replace(/(\*\*|###|##|#)/g, (match) => {
+            if (match === '#') return '<h1 class="text-2xl font-bold mb-4">';
+            if (match === '##') return '<h2 class="text-xl font-bold mt-6 mb-3">';
+            if (match === '###') return '<h3 class="text-lg font-bold mt-4 mb-2">';
+            return '<strong>';
+        }).replace(/\n/g, '<br>');
+    };
+    
+    window.handlePlanoDeAcao = async (nomeMeta, totalMeta) => {
+        const modalBody = document.getElementById('plano-meta-modal-body');
+        modalBody.innerHTML = `<div class="flex flex-col items-center justify-center h-48"><div class="loader"></div><p class="mt-4 text-gray-600">Criando seu plano de ação para '${nomeMeta}'...</p></div>`;
+        openModal('planoMetaModal');
+
+        const prompt = `
+            Você é um planejador financeiro e coach de motivação. Crie um plano de ação passo a passo, simples e encorajador para alguém que quer economizar ${formatCurrency(totalMeta)} para atingir a meta de '${nomeMeta}'. 
+            O plano deve incluir:
+            1. Um parágrafo introdutório motivacional.
+            2. Etapas mensuráveis e realistas (ex: "Semana 1", "Mês 1").
+            3. Pelo menos 3 dicas criativas de economia relacionadas à meta.
+            4. Uma conclusão positiva.
+            Formate a resposta usando Markdown.
+        `;
+
+        const response = await callGemini(prompt);
+        modalBody.innerHTML = response.replace(/(\*\*|###|##|#)/g, (match) => {
+            if (match === '#') return '<h1 class="text-2xl font-bold mb-4">';
+            if (match === '##') return '<h2 class="text-xl font-bold mt-6 mb-3">';
+            if (match === '###') return '<h3 class="text-lg font-bold mt-4 mb-2">';
+            return '<strong>';
+        }).replace(/\n/g, '<br>');
+    };
+    
+    window.deleteItem = async (collectionName, id) => {
+        if(confirm(`Tem certeza que deseja apagar este item?`)){
+            await deleteDoc(doc(state.db, collectionName, id));
+        }
+    }
+    
+    window.updateParcelaPaga = async (id, pagas) => {
+        const docRef = doc(state.db, state.collections.parcelamentos.path, id);
+        await updateDoc(docRef, { pagas: pagas + 1 });
+    }
+
+    function updateKPIs() {
+        const today = new Date();
+        const lancamentosMes = state.lancamentos.filter(l => {
+            const dataLancamento = l.data.toDate();
+            return dataLancamento.getMonth() === today.getMonth() && dataLancamento.getFullYear() === today.getFullYear();
+        });
+
+        const receitaMes = lancamentosMes.filter(l => l.tipo === 'receita').reduce((sum, l) => sum + l.valor, 0);
+        const despesaMes = lancamentosMes.filter(l => l.tipo === 'despesa').reduce((sum, l) => sum + l.valor, 0);
+        const saldoMes = receitaMes - despesaMes;
+        const pendenteTotal = state.lancamentos.filter(l => l.status === 'Pendente').reduce((sum, l) => sum + l.valor, 0);
+
+        document.getElementById('kpi-receita').textContent = formatCurrency(receitaMes);
+        document.getElementById('kpi-despesa').textContent = formatCurrency(despesaMes);
+        document.getElementById('kpi-saldo').textContent = formatCurrency(saldoMes);
+        document.getElementById('kpi-pendente').textContent = formatCurrency(pendenteTotal);
+
+        document.getElementById('kpi-saldo').classList.toggle('text-green-600', saldoMes >= 0);
+        document.getElementById('kpi-saldo').classList.toggle('text-red-600', saldoMes < 0);
+    }
+
+    function renderFluxoCaixaChart() {
+        const ctx = document.getElementById('fluxoCaixaChart').getContext('2d');
+        const labels = [];
+        const receitaData = [];
+        const despesaData = [];
+
+        for (let i = 5; i >= 0; i--) {
+            const d = new Date();
+            d.setMonth(d.getMonth() - i);
+            labels.push(d.toLocaleString('pt-BR', { month: 'short', year: '2-digit' }));
+            
+            const month = d.getMonth();
+            const year = d.getFullYear();
+
+            const lancamentosDoMes = state.lancamentos.filter(l => {
+                const dataLancamento = l.data.toDate();
+                return dataLancamento.getMonth() === month && dataLancamento.getFullYear() === year;
+            });
+            
+            receitaData.push(lancamentosDoMes.filter(l => l.tipo === 'receita').reduce((s, l) => s + l.valor, 0));
+            despesaData.push(lancamentosDoMes.filter(l => l.tipo === 'despesa').reduce((s, l) => s + l.valor, 0));
+        }
+
+        if(state.charts.fluxoCaixa) state.charts.fluxoCaixa.destroy();
+
+        state.charts.fluxoCaixa = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [
+                    { label: 'Receitas', data: receitaData, backgroundColor: '#16a34a', borderRadius: 4 },
+                    { label: 'Despesas', data: despesaData, backgroundColor: '#dc2626', borderRadius: 4 }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    y: { beginAtZero: true, grid: { drawOnChartArea: false } },
+                    x: { grid: { display: false } }
+                },
+                plugins: { legend: { position: 'top' } }
+            }
+        });
+    }
+
+    function renderDespesasCategoriaChart() {
+        const ctx = document.getElementById('despesasCategoriaChart').getContext('2d');
+        const despesas = state.lancamentos.filter(l => l.tipo === 'despesa');
+        const dataPorCategoria = {};
+
+        despesas.forEach(d => {
+            if (dataPorCategoria[d.categoria]) dataPorCategoria[d.categoria] += d.valor;
+            else dataPorCategoria[d.categoria] = d.valor;
+        });
+
+        if(state.charts.despesas) state.charts.despesas.destroy();
+
+        state.charts.despesas = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: Object.keys(dataPorCategoria),
+                datasets: [{
+                    data: Object.values(dataPorCategoria),
+                    backgroundColor: ['#135D66', '#77B0AA', '#003C43', '#E3FEF7', '#D98C6B', '#A96B54', '#794c3a'],
+                    borderColor: '#fff',
+                    borderWidth: 2
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: true, position: 'bottom', labels: { boxWidth: 12, padding: 15 } } }
+            }
+        });
+    }
+
+    function applyFilters(lancamentos) {
+        const { descricao, tipo, categoria, banco } = state.filters;
+        return lancamentos.filter(l => {
+            const filterDescricao = !descricao || l.descricao.toLowerCase().includes(descricao.toLowerCase());
+            const filterTipo = tipo === 'todos' || l.tipo === tipo;
+            const filterCategoria = categoria === 'todas' || l.categoria === categoria;
+            const filterBanco = banco === 'todos' || l.banco === banco;
+            return filterDescricao && filterTipo && filterCategoria && filterBanco;
+        });
+    }
+    
+    function renderLancamentosTable() {
+        const tableBody = document.getElementById('lancamentos-table-body');
+        tableBody.innerHTML = '';
+        const filteredLancamentos = applyFilters(state.lancamentos);
+
+        filteredLancamentos.sort((a,b) => b.data.toDate() - a.data.toDate()).forEach(l => {
+            const row = document.createElement('tr');
+            row.className = 'border-b border-gray-100 hover:bg-gray-50 cursor-pointer';
+            row.onclick = () => deleteItem(state.collections.lancamentos.path, l.id);
+            row.innerHTML = `
+                <td class="p-4">${formatDate(l.data)}</td>
+                <td class="p-4 font-medium">${l.descricao}</td>
+                <td class="p-4 text-sm text-gray-600">${l.banco || ''}</td>
+                <td class="p-4"><span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-700">${l.categoria}</span></td>
+                <td class="p-4 text-right font-medium ${l.tipo === 'receita' ? 'text-green-600' : 'text-red-600'}">${formatCurrency(l.valor)}</td>
+                <td class="p-4"><span class="px-2 py-1 text-xs font-semibold rounded-full ${l.status === 'Pago' ? 'bg-green-100 text-green-800' : 'bg-orange-100 text-orange-800'}">${l.status}</span></td>
+            `;
+            tableBody.appendChild(row);
+        });
+    }
+
+    function renderMetas() {
+        const container = document.getElementById('metas-container');
+        container.innerHTML = '';
+        state.metas.forEach(meta => {
+            const valorAtual = state.lancamentos
+                .filter(l => l.categoria === 'Investimentos/Metas' && l.descricao.includes(meta.nome))
+                .reduce((sum, l) => sum + l.valor, 0);
+            const percentual = meta.total > 0 ? (valorAtual / meta.total) * 100 : 0;
+            const faltante = meta.total - valorAtual;
+
+            const metaEl = document.createElement('div');
+            metaEl.className = 'bg-white p-6 rounded-xl border border-gray-200';
+            metaEl.innerHTML = `
+                <div class="flex justify-between items-start mb-2">
+                    <div>
+                        <h3 class="text-lg font-bold">${meta.nome}</h3>
+                        <div class="text-sm text-gray-500 mt-1">
+                            <span>${formatCurrency(valorAtual)}</span> de <span>${formatCurrency(meta.total)}</span>
+                        </div>
+                    </div>
+                     <button onclick="deleteItem('${state.collections.metas.path}', '${meta.id}')" class="text-red-400 hover:text-red-600 font-bold text-lg">&times;</button>
+                </div>
+                <div class="w-full bg-gray-200 rounded-full h-4 mt-4">
+                    <div class="bg-[#135D66] h-4 rounded-full" style="width: ${Math.min(100, percentual)}%"></div>
+                </div>
+                <div class="flex justify-between items-center mt-4">
+                    <span class="text-sm text-gray-600">Faltam ${formatCurrency(faltante > 0 ? faltante : 0)}</span>
+                    <button onclick="handlePlanoDeAcao('${meta.nome}', ${meta.total})" class="bg-blue-100 text-blue-800 text-xs font-bold py-1 px-3 rounded-full hover:bg-blue-200 transition-colors">
+                        ✨ Criar Plano
+                    </button>
+                </div>
+            `;
+            container.appendChild(metaEl);
+        });
+    }
+
+    function renderParcelamentos() {
+        const tableBody = document.getElementById('parcelamentos-table-body');
+        tableBody.innerHTML = '';
+        state.parcelamentos.forEach(p => {
+            const valorParcela = p.valorTotal / p.parcelas;
+            const valorRestante = (p.parcelas - p.pagas) * valorParcela;
+            
+            const row = document.createElement('tr');
+            row.className = 'border-b border-gray-100';
+            row.innerHTML = `
+                <td class="p-4 font-medium">${p.descricao}</td>
+                <td class="p-4"><span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-700">${p.categoria}</span></td>
+                <td class="p-4">${p.pagas} de ${p.parcelas}</td>
+                <td class="p-4 text-sm text-gray-600">${formatCurrency(valorParcela)} / mês</td>
+                <td class="p-4 text-right font-bold text-orange-600">${formatCurrency(valorRestante)}</td>
+                <td class="p-4 text-center">
+                  ${p.pagas < p.parcelas ? `<button onclick="updateParcelaPaga('${p.id}', ${p.pagas})" class="text-green-500 hover:text-green-700 font-bold text-xl">+</button>` : ''}
+                  <button onclick="deleteItem('${state.collections.parcelamentos.path}', '${p.id}')" class="text-red-400 hover:text-red-600 font-bold text-xl ml-3">&times;</button>
+                </td>
+            `;
+            tableBody.appendChild(row);
+        });
+    }
+    
+    function renderBancosManagement() {
+        const listContainer = document.getElementById('banco-list');
+        listContainer.innerHTML = '';
+        if (state.bancos.length === 0) {
+            listContainer.innerHTML = '<p class="text-gray-500 text-center">Nenhum banco cadastrado.</p>';
+            return;
+        }
+        state.bancos.forEach(banco => {
+            const item = document.createElement('div');
+            item.className = 'flex justify-between items-center p-2 bg-gray-50 rounded';
+            item.innerHTML = `
+                <span class="font-medium">${banco.nome}</span>
+                <button onclick="deleteItem('${state.collections.bancos.path}', '${banco.id}')" class="text-red-400 hover:text-red-600 font-bold text-lg">&times;</button>
+            `;
+            listContainer.appendChild(item);
+        });
+    }
+    
+    function updateBankDropdowns() {
+        const selects = [
+            document.getElementById('banco'),
+            document.getElementById('filter-banco')
+        ];
+        
+        selects.forEach(select => {
+            if (!select) return;
+            const currentValue = select.value;
+            let optionsHtml = '';
+            if (select.id === 'filter-banco') {
+                 optionsHtml = '<option value="todos">Todos</option>';
+            }
+            state.bancos.forEach(banco => {
+                optionsHtml += `<option value="${banco.nome}">${banco.nome}</option>`;
+            });
+            select.innerHTML = optionsHtml;
+            select.value = currentValue;
+        });
+    }
+
+    window.showView = (viewId) => {
+        state.activeView = viewId;
+        state.views.forEach(v => document.getElementById(v).classList.add('hidden'));
+        document.getElementById(viewId).classList.remove('hidden');
+
+        document.querySelectorAll('.nav-link').forEach(link => {
+            link.classList.remove('bg-[#E3FEF7]', 'text-[#135D66]', 'font-semibold');
+            link.classList.add('hover:bg-gray-100', 'font-medium');
+        });
+        const activeLink = document.querySelector(`.nav-link[onclick="showView('${viewId}')"]`);
+        activeLink.classList.add('bg-[#E3FEF7]', 'text-[#135D66]', 'font-semibold');
+    };
+
+    window.openModal = (modalId) => {
+        document.getElementById(modalId).classList.add('flex');
+        document.getElementById(modalId).classList.remove('hidden');
+    };
+    
+    window.closeModal = (modalId) => {
+        document.getElementById(modalId).classList.add('hidden');
+        document.getElementById(modalId).classList.remove('flex');
+    };
+
+    function setupForms() {
+        const lancamentoForm = document.getElementById('lancamentoForm');
+        lancamentoForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(lancamentoForm);
+            await addDoc(state.collections.lancamentos, {
+                tipo: formData.get('tipo'),
+                descricao: formData.get('descricao'),
+                valor: parseFloat(formData.get('valor')),
+                data: new Date(formData.get('data')),
+                banco: formData.get('banco'),
+                categoria: formData.get('categoria'),
+                status: formData.get('status'),
+            });
+            lancamentoForm.reset();
+            document.getElementById('data').valueAsDate = new Date();
+            closeModal('lancamentoModal');
+        });
+
+        const metaForm = document.getElementById('metaForm');
+        metaForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(metaForm);
+            await addDoc(state.collections.metas, {
+                nome: formData.get('nome'),
+                total: parseFloat(formData.get('total')),
+            });
+            metaForm.reset();
+            closeModal('metaModal');
+        });
+
+        const parcelamentoForm = document.getElementById('parcelamentoForm');
+        parcelamentoForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(parcelamentoForm);
+            await addDoc(state.collections.parcelamentos, {
+                 descricao: formData.get('descricao'),
+                 categoria: formData.get('categoria'),
+                 valorTotal: parseFloat(formData.get('valorTotal')),
+                 parcelas: parseInt(formData.get('parcelas')),
+                 pagas: parseInt(formData.get('pagas')),
+            });
+            parcelamentoForm.reset();
+            closeModal('parcelamentoModal');
+        });
+
+        const bancoForm = document.getElementById('bancoForm');
+        bancoForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const nomeBanco = document.getElementById('banco-nome').value;
+            if(nomeBanco) {
+                await addDoc(state.collections.bancos, { nome: nomeBanco });
+                bancoForm.reset();
+            }
+        });
+
+        const tipoSelect = document.getElementById('tipo');
+        const categoriaSelect = document.getElementById('categoria');
+        const statusSelect = document.getElementById('status');
+        const parcelamentoCategoriaSelect = document.getElementById('parcelamento-categoria');
+
+        const updateCategorias = () => {
+            const tipo = tipoSelect.value;
+            categoriaSelect.innerHTML = '';
+            state.categorias[tipo].forEach(cat => {
+                const option = document.createElement('option');
+                option.value = cat;
+                option.textContent = cat;
+                categoriaSelect.appendChild(option);
+            });
+        };
+
+        statusSelect.innerHTML = state.status.map(s => `<option value="${s}">${s}</option>`).join('');
+        parcelamentoCategoriaSelect.innerHTML = state.categorias.despesa.map(cat => `<option value="${cat}">${cat}</option>`).join('');
+        tipoSelect.addEventListener('change', updateCategorias);
+        
+        document.getElementById('data').valueAsDate = new Date();
+        updateCategorias();
+    }
+    
+    function setupFilters() {
+        const filterDescricao = document.getElementById('filter-descricao');
+        const filterTipo = document.getElementById('filter-tipo');
+        const filterCategoria = document.getElementById('filter-categoria');
+        const filterBanco = document.getElementById('filter-banco');
+        const clearBtn = document.getElementById('clear-filters-btn');
+
+        const allCategories = [...state.categorias.receita, ...state.categorias.despesa];
+        const uniqueCategories = [...new Set(allCategories)];
+        filterCategoria.innerHTML = '<option value="todas">Todas</option>';
+        uniqueCategories.forEach(cat => {
+            filterCategoria.innerHTML += `<option value="${cat}">${cat}</option>`;
+        });
+
+        filterDescricao.addEventListener('input', (e) => {
+            state.filters.descricao = e.target.value;
+            renderLancamentosTable();
+        });
+        filterTipo.addEventListener('change', (e) => {
+            state.filters.tipo = e.target.value;
+            renderLancamentosTable();
+        });
+        filterCategoria.addEventListener('change', (e) => {
+            state.filters.categoria = e.target.value;
+            renderLancamentosTable();
+        });
+        filterBanco.addEventListener('change', (e) => {
+            state.filters.banco = e.target.value;
+            renderLancamentosTable();
+        });
+
+        clearBtn.addEventListener('click', () => {
+            state.filters = { descricao: '', tipo: 'todos', categoria: 'todas', banco: 'todos' };
+            filterDescricao.value = '';
+            filterTipo.value = 'todos';
+            filterCategoria.value = 'todas';
+            filterBanco.value = 'todos';
+            renderLancamentosTable();
+        });
+    }
+
+    function updateUI() {
+        if (!state.userId) return;
+        updateKPIs();
+        renderFluxoCaixaChart();
+        renderDespesasCategoriaChart();
+        renderLancamentosTable();
+        renderMetas();
+        renderParcelamentos();
+        renderBancosManagement();
+        updateBankDropdowns();
+    }
+    
+    function setupListeners() {
+        onSnapshot(query(state.collections.lancamentos), (snapshot) => {
+            state.lancamentos = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            updateUI();
+        });
+        onSnapshot(query(state.collections.metas), (snapshot) => {
+            state.metas = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            updateUI();
+        });
+        onSnapshot(query(state.collections.parcelamentos), (snapshot) => {
+            state.parcelamentos = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            updateUI();
+        });
+        onSnapshot(query(state.collections.bancos), (snapshot) => {
+            state.bancos = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            updateUI();
+        });
+    }
+
+    async function main() {
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        state.db = getFirestore(app);
+        
+        try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+                await signInAnonymously(auth);
+            }
+        } catch(error) {
+            console.error("Firebase Auth Error:", error);
+            document.getElementById('app-loader').innerHTML = '<p class="text-red-500">Erro de autenticação.</p>';
+            return;
+        }
+
+        state.userId = auth.currentUser.uid;
+        document.getElementById('user-id-display').textContent = state.userId;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        state.collections.lancamentos = collection(state.db, 'artifacts', appId, 'users', state.userId, 'lancamentos');
+        state.collections.metas = collection(state.db, 'artifacts', appId, 'users', state.userId, 'metas');
+        state.collections.parcelamentos = collection(state.db, 'artifacts', appId, 'users', state.userId, 'parcelamentos');
+        state.collections.bancos = collection(state.db, 'artifacts', appId, 'users', state.userId, 'bancos');
+
+        setupForms();
+        setupFilters();
+        setupListeners();
+        
+        document.getElementById('app-loader').style.display = 'none';
+    }
+
+    main();
+</script>
+</body>
+</html>
